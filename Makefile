@@ -11,4 +11,4 @@ testhttp_raw: testhttp_raw.o err.o
 
 .PHONY: clean TARGET
 clean:
-	rm -f nk-client-tcp nk-server-tcp *.o *~ *.bak
+	rm -f testhttp_raw *.o *~ *.bak

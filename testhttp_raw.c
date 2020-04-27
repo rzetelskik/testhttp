@@ -9,20 +9,16 @@
 #include <ctype.h>
 #include "err.h"
 
-#define BUFFLEN 4096
+#define BUFFLEN 16384
 #define STATUS_OK "200"
-#define BUFF_FILE "_tmp"
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
-int sock, err;
-struct addrinfo addr_hints, *addr_result;
-char *executable, *connection_addr, *connection_port, *host_addr, *host_path;
-size_t content_len;
+int sock;
+char *executable, *connection_addr, *connection_port, *host_addr, *host_path, *cookies;
+size_t content_len = 0;
 int chunked_field_flag = 0;
+char buffer[BUFFLEN];
 
-__attribute__((destructor))
-void clean_up() {
-    unlink(BUFF_FILE);
-}
 
 void raise_err_usage() {
     fatal("Usage: %s <host address>:<port> <cookie file> <http test address>", executable);
@@ -51,12 +47,14 @@ void parse_host(char *arg) {
 }
 
 void connect_socket() {
+    struct addrinfo addr_hints, *addr_result;
+
     memset(&addr_hints, 0, sizeof(struct addrinfo));
-    addr_hints.ai_family = PF_INET; // IPv4
+    addr_hints.ai_family = AF_INET; // IPv4
     addr_hints.ai_socktype = SOCK_STREAM;
     addr_hints.ai_protocol = IPPROTO_TCP;
-    err = getaddrinfo(connection_addr, connection_port, &addr_hints, &addr_result);
 
+    int err = getaddrinfo(connection_addr, connection_port, &addr_hints, &addr_result);
     if (err == EAI_SYSTEM) // system error
         syserr("getaddrinfo: %s", gai_strerror(err));
     else if (err != 0) // other error (host not found, etc.)
@@ -77,70 +75,79 @@ void connect_socket() {
 void write_to_host(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    size_t len = vsnprintf(0, 0, fmt, args) + 1;
+    size_t len = vsnprintf(0, 0, fmt, args) + 1; // count how much memory to allocate
     va_end(args);
 
-    char buffer[len];
-
+    char buff[len];
     va_start(args, fmt);
-    vsnprintf(buffer, len, fmt, args);
+    vsnprintf(buff, len, fmt, args);
     va_end(args);
 
-    if (write(sock, buffer, len - 1) != len - 1)
+    if (write(sock, buff, len - 1) != len - 1)
         syserr("partial / failed write");
 }
 
-void write_cookies_to_host(char *arg) {
-    char *line = NULL;
-    size_t len = 0;
-    ssize_t recval;
+// replace trailing CRLF with null byte
+char *remove_trailing_crlf(char *str) {
+    size_t len = strlen(str);
+    if (len > 1 && str[len - 2] == '\r')
+        str[len - 2] = '\0';
+    else if (len && str[len - 1] == '\n')
+        str[len - 1] = '\0';
 
-    FILE *in_cookies = fopen(arg, "rt");
+    return str;
+}
+
+void append_cookie(char *line, size_t *total_len) {
+    line = remove_trailing_crlf(line);
+    if (!cookies) {
+        cookies = calloc(strlen(line) + 1, sizeof(char));
+        memcpy(cookies, line, strlen(line));
+    } else {
+        cookies = realloc(cookies, *total_len + strlen(line) + 2);
+        strcat(cookies, "; ");
+        strcat(cookies, line);
+    }
+    *total_len += strlen(line) + 2;
+}
+
+int parse_cookies_from_file(char *path) {
+    char *line = NULL;
+    size_t len = 0, total_len = 0;
+
+    FILE *in_cookies = fopen(path, "rt");
     if (!in_cookies)
         syserr("fopen");
 
-    while ((recval = getline(&line, &len, in_cookies)) > 0) {
-        write_to_host("Set-Cookie: %.*s\r\n", recval - (line[recval - 1] == '\n' ? 1 : 0), line);
+    cookies = NULL;
+
+    while (getline(&line, &len, in_cookies) > 0) {
+        append_cookie(line, &total_len);
     }
 
-    free(line);
+    if (line) free(line);
     fclose(in_cookies);
-}
 
-void read_response() {
-    FILE *buff_file = fopen(BUFF_FILE, "wb");
-    if (!buff_file)
-        syserr("fopen");
-
-    ssize_t rcv_len, rcv_len_total = 0;
-    char buffer[BUFFLEN];
-
-    do {
-        memset(buffer, 0, BUFFLEN);
-        if ((rcv_len = read(sock, buffer, BUFFLEN)) < 0)
-            syserr("read");
-        if (fwrite(buffer, 1, BUFFLEN, buff_file) < 0)
-            syserr("write");
-
-        rcv_len_total += rcv_len;
-    } while (rcv_len);
-
-    fclose(buff_file);
+    return (!cookies);
 }
 
 int parse_status_line(FILE *stream) {
     char *line = NULL;
     size_t len = 0;
 
-    int status_ok = (getline(&line, &len, stream) < 0 || strstr(line, STATUS_OK) == NULL);
-    if (status_ok)
-        printf("%s", line);
+    if (getline(&line, &len, stream) < 0)
+        syserr("No status header received.");
+
+    int status_not_ok = !strstr(line, STATUS_OK);
+    if (status_not_ok) {
+        printf("%s\n", remove_trailing_crlf(line));
+    }
 
     free(line);
-
-    return status_ok;
+    return status_not_ok;
 }
 
+// perform tolower() on all characters in the array
 char *str_to_lower(char *str) {
     for (char *c = str; *c; ++c)
         *c = tolower(*c);
@@ -154,6 +161,7 @@ char *remove_leading_whitespace(char *str) {
     return str;
 }
 
+// replace trailing whitespace with a null byte
 char *remove_trailing_whitespace(char *str) {
     char *retval = str;
 
@@ -173,7 +181,7 @@ char *remove_whitespace(char *str) {
 }
 
 void print_cookie_report(char *str) {
-    printf("%s\r\n", str);
+    printf("%s\n", str);
 }
 
 void parse_response_headers(FILE *stream) {
@@ -183,10 +191,7 @@ void parse_response_headers(FILE *stream) {
 
     while (getline(&line, &len, stream) > 2) {
         key = str_to_lower(strsep(&line, ":"));
-        if (!strcmp(key, "content-length")) {
-            value = remove_whitespace(line);
-            content_len = strtoul(value, 0, 10);
-        } else if (!strcmp(key, "set-cookie")) {
+        if (!strcmp(key, "set-cookie")) {
             value = remove_whitespace(strsep(&line, ";"));
             print_cookie_report(value);
         } else if (!strcmp(key, "transfer-encoding") && strstr(str_to_lower(line), "chunked")) {
@@ -194,24 +199,40 @@ void parse_response_headers(FILE *stream) {
         }
         line = key;
     }
-    free(line);
+    if (line) free(line);
 }
 
+// discard the following n bytes from stream
+void skip_bytes(FILE *stream, size_t n) {
+    size_t read_len;
+    ssize_t bytes_left = n + 2;
+    while (bytes_left) {
+        read_len = MIN(bytes_left, BUFFLEN);
+        if (fread(buffer, 1, read_len, stream) != read_len)
+            syserr("fread");
+
+        bytes_left -= read_len;
+    }
+}
+
+// add the following chunk's length (provided) to content_len and discard the chunk
 int parse_chunk(FILE *stream) {
-    size_t chunk_content_len, len = 0;
-    char *line = NULL;
+    size_t chunk_len, len = 0;
+    char *line = NULL, *endptr;
+
     if (getline(&line, &len, stream) < 0) {
-        free(line);
+        if (line) free(line);
         return 1;
     }
-    chunk_content_len = strtoul(remove_whitespace(line), 0, 16);
+
+    chunk_len = strtoul(remove_whitespace(line), &endptr, 16);
     free(line);
-
-    if (!chunk_content_len || fseeko(stream, chunk_content_len + 2, SEEK_CUR) != 0) {
+    if (!chunk_len)
         return 1;
-    }
 
-    content_len += chunk_content_len;
+    skip_bytes(stream, chunk_len);
+
+    content_len += chunk_len;
     return 0;
 }
 
@@ -220,24 +241,34 @@ void calc_chunk_content_length(FILE *stream) {
     while (!parse_chunk(stream));
 }
 
+ssize_t read_body(FILE *stream) {
+    ssize_t ret, sum = 0;
+    while ((ret = fread(buffer, 1, BUFFLEN, stream)) > 0) {
+        if (ret < 0)
+            syserr("fread");
+        sum += ret;
+    }
+    return sum;
+}
+
+void calc_content_length(FILE *stream) {
+    content_len = read_body(stream);
+}
+
 void print_content_length_report() {
     printf("Dlugosc zasobu: %lu\n", content_len);
 }
 
-int parse_response() {
-    FILE *stream = fopen(BUFF_FILE, "rb");
-    if (!stream)
-        syserr("fopen");
-
-    if (parse_status_line(stream) != 0) {
-        fclose(stream);
+int parse_read_response(FILE *stream) {
+    if (parse_status_line(stream) != 0)
         return 1;
-    }
+
     parse_response_headers(stream);
     if (chunked_field_flag)
         calc_chunk_content_length(stream);
+    else
+        calc_content_length(stream);
 
-    fclose(stream);
     return 0;
 }
 
@@ -253,13 +284,23 @@ int main(int argc, char *argv[]) {
 
     write_to_host("GET /%.*s HTTP/1.1\r\n", (host_path ? strlen(host_path) : 0), host_path);
     write_to_host("Host: %s\r\n", host_addr);
-    write_cookies_to_host(argv[2]);
+    if (!parse_cookies_from_file(argv[2])) {
+        write_to_host("Cookie: %s\r\n", cookies);
+        free(cookies);
+    }
     write_to_host("Connection: close\r\n\r\n");
 
-    read_response();
-    if (!parse_response())
-        print_content_length_report();
+    FILE *stream = fdopen(sock, "rb");
+    if (!stream)
+        syserr("fdopen");
 
-    close(sock);
+    if (!parse_read_response(stream))
+        print_content_length_report();
+    else
+        (void) read_body(stream);
+
+    if (fclose(stream) < 0)
+        syserr("fclose");
+
     return 0;
 }
