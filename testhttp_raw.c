@@ -11,11 +11,12 @@
 
 #define BUFFLEN 16384
 #define STATUS_OK "200"
+#define HTTP_VER_STR "HTTP/1.1 "
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
 int sock;
 char *executable, *connection_addr, *connection_port, *host_addr, *host_path, *cookies;
-size_t content_len = 0;
+size_t host_addr_len = 0, content_len = 0;
 int chunked_field_flag = 0;
 char buffer[BUFFLEN];
 
@@ -41,9 +42,16 @@ void parse_host(char *arg) {
     else
         raise_err_usage();
 
-
-    host_addr = strsep(&str, "/");
-    host_path = str;
+    host_addr = str;
+    if ((host_path = strchr(str, '/'))) {
+        host_addr_len = (size_t) (host_path - host_addr);
+        host_path += 1;
+    } else if ((host_path = strchr(str, '?')) || (host_path = strchr(str, '&'))
+               || (host_path = strchr(str, '#'))) {
+        host_addr_len = (size_t) (host_path - host_addr);
+    } else {
+        host_addr_len = strlen(host_addr);
+    }
 }
 
 void connect_socket() {
@@ -140,7 +148,7 @@ int parse_status_line(FILE *stream) {
 
     int status_not_ok = !strstr(line, STATUS_OK);
     if (status_not_ok) {
-        printf("%s\n", remove_trailing_crlf(line));
+        printf("%s\n", remove_trailing_crlf(line + (strstr(line, HTTP_VER_STR) ? strlen(HTTP_VER_STR) : 0)));
     }
 
     free(line);
@@ -283,7 +291,7 @@ int main(int argc, char *argv[]) {
     connect_socket();
 
     write_to_host("GET /%.*s HTTP/1.1\r\n", (host_path ? strlen(host_path) : 0), host_path);
-    write_to_host("Host: %s\r\n", host_addr);
+    write_to_host("Host: %.*s\r\n", host_addr_len, host_addr);
     if (!parse_cookies_from_file(argv[2])) {
         write_to_host("Cookie: %s\r\n", cookies);
         free(cookies);
