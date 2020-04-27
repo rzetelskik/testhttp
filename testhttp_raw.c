@@ -42,12 +42,11 @@ void parse_host(char *arg) {
     else
         raise_err_usage();
 
-    host_addr = str;
-    if ((host_path = strchr(str, '/'))) {
+    host_addr = strsep(&str, "#");
+    if ((host_path = strchr(host_addr, '/'))) {
         host_addr_len = (size_t) (host_path - host_addr);
         host_path += 1;
-    } else if ((host_path = strchr(str, '?')) || (host_path = strchr(str, '&'))
-               || (host_path = strchr(str, '#'))) {
+    } else if ((host_path = strchr(host_addr, '?')) || (host_path = strchr(host_addr, '&'))) {
         host_addr_len = (size_t) (host_path - host_addr);
     } else {
         host_addr_len = strlen(host_addr);
